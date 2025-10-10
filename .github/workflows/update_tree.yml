@@ -26,7 +26,7 @@ jobs:
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
-          NOTION_PAGE_ID: ${{ secrets.NOTION_PAGE_ID }}
+          NOTION_BLOCK_ID: ${{ secrets.NOTION_BLOCK_ID }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COMMIT_BACK: ${{ secrets.COMMIT_BACK }} # optional, true/false
         run: |
