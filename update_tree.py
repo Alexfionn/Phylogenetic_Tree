@@ -175,31 +175,27 @@ def update_code_block(block_id: str, mermaid_text: str) -> bool:
     print(f"[INFO] Retrieving block {pretty_preview(block_id)} ...")
     b = retrieve_block(block_id)
     if not b:
-        print("[ERROR] Konnte Block nicht abrufen (siehe oben).")
+        print("[ERROR] Konnte Block nicht abrufen.")
         return False
     btype = b.get("type")
     print(f"[INFO] Block type from API: {btype}")
     if btype != "code":
-        print("[ERROR] Block ist kein 'code' Block. Bitte setze NOTION_BLOCK_ID auf einen code-block.")
-        # print small excerpt of returned block for debugging
-        print("Block preview keys:", list(b.keys())[:12])
+        print("[ERROR] Block ist kein 'code' Block.")
         return False
-    # Prepare payload: Notion expects 'code': { 'text': [ { type: 'text', text: { content: ... } } ], 'language': 'mermaid' }
+
     payload = {
         "code": {
-            "text": [{"type":"text","text":{"content": mermaid_text}}],
+            "rich_text": [{"type": "text", "text": {"content": mermaid_text}}],
             "language": "mermaid"
         }
     }
+
     try:
         notion.blocks.update(block_id=block_id, **payload)
         print("[OK] Block aktualisiert.")
         return True
-    except APIResponseError as e:
-        print("[ERROR] notion.blocks.update failed:", getattr(e, "message", str(e)))
-        return False
     except Exception as e:
-        print("[ERROR] Unexpected error during update:", e)
+        print("[ERROR] notion.blocks.update failed:", e)
         return False
 
 # ---- Files write ----
