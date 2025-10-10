@@ -1,20 +1,22 @@
-name: Update Notion Phylo Tree (block-id, verbose)
+name: Update Notion Phylo Tree
 
 on:
   schedule:
-    - cron: '0 6 * * *'  # 06:00 UTC daily (adjust)
+    - cron: '0 6 * * *' # täglich 06:00 UTC
   workflow_dispatch: {}
 
 permissions:
-  contents: write   # erlaubt push falls COMMIT_BACK true
+  contents: write   # nötig für Commit & Push
 
 jobs:
   update-tree:
     runs-on: ubuntu-latest
+
     env:
       TZ: "Europe/Zurich"
+
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -24,27 +26,24 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install deps
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install notion-client requests python-dotenv
 
-      - name: Debug: show secrets preview
+      - name: Show secrets preview (safe)
         env:
-          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
           NOTION_BLOCK_ID: ${{ secrets.NOTION_BLOCK_ID }}
           COMMIT_BACK: ${{ secrets.COMMIT_BACK }}
         run: |
-          set -euo pipefail
-          if [ -z "${NOTION_TOKEN:-}" ]; then echo "ERROR: NOTION_TOKEN missing"; exit 1; fi
           echo "NOTION_DATABASE_ID len: ${#NOTION_DATABASE_ID}"
           echo "NOTION_BLOCK_ID len: ${#NOTION_BLOCK_ID}"
           echo "NOTION_DATABASE_ID preview: ${NOTION_DATABASE_ID:0:4}...${NOTION_DATABASE_ID: -4}"
-          echo "NOTION_BLOCK_ID preview  : ${NOTION_BLOCK_ID:0:4}...${NOTION_BLOCK_ID: -4}"
+          echo "NOTION_BLOCK_ID preview: ${NOTION_BLOCK_ID:0:4}...${NOTION_BLOCK_ID: -4}"
           echo "COMMIT_BACK = ${COMMIT_BACK:-false}"
 
-      - name: Run update script
+      - name: Run update_tree.py
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
@@ -55,7 +54,7 @@ jobs:
           set -euo pipefail
           python update_tree.py
 
-      - name: Show produced files
+      - name: List generated data files
         run: |
           echo "=== ls data ==="
           ls -la data || true
@@ -85,4 +84,3 @@ jobs:
             remote="https://x-access-token:${GITHUB_TOKEN}@github.com/${repo}.git"
             git remote set-url origin "$remote"
             git push origin "$branch" || echo "push failed"
-          fi
