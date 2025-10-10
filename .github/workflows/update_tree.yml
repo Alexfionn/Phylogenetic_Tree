@@ -1,0 +1,40 @@
+name: Daily Notion Phylo Tree Update
+
+on:
+  schedule:
+    - cron: '0 3 * * *' # täglich 03:00 UTC (anpassbar)
+  workflow_dispatch: {} # manueller Trigger möglich
+
+jobs:
+  update-tree:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install notion-client requests python-dotenv
+
+      - name: Run update script
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          NOTION_PAGE_ID: ${{ secrets.NOTION_PAGE_ID }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMIT_BACK: ${{ secrets.COMMIT_BACK }} # optional, true/false
+        run: |
+          python update_tree.py
+
+      # Optional: push changes if COMMIT_BACK true
+      - name: Push changes back (if any)
+        if: env.COMMIT_BACK == 'true'
+        uses: ad-m/github-push-action@v0.6.0
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
