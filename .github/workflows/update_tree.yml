@@ -1,0 +1,87 @@
+name: Update Notion Phylo Tree
+
+on:
+  schedule:
+    - cron: '0 6 * * *' # täglich 06:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write   # nötig für Commit & Push
+
+jobs:
+  update-tree:
+    runs-on: ubuntu-latest
+
+    env:
+      TZ: "Europe/Zurich"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install notion-client requests python-dotenv
+
+      - name: Show secrets preview (safe)
+        env:
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          NOTION_BLOCK_ID: ${{ secrets.NOTION_BLOCK_ID }}
+          COMMIT_BACK: ${{ secrets.COMMIT_BACK }}
+        run: |
+          echo "NOTION_DATABASE_ID len: ${#NOTION_DATABASE_ID}"
+          echo "NOTION_BLOCK_ID len: ${#NOTION_BLOCK_ID}"
+          echo "NOTION_DATABASE_ID preview: ${NOTION_DATABASE_ID:0:4}...${NOTION_DATABASE_ID: -4}"
+          echo "NOTION_BLOCK_ID preview: ${NOTION_BLOCK_ID:0:4}...${NOTION_BLOCK_ID: -4}"
+          echo "COMMIT_BACK = ${COMMIT_BACK:-false}"
+
+      - name: Run update_tree.py
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          NOTION_BLOCK_ID: ${{ secrets.NOTION_BLOCK_ID }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMIT_BACK: ${{ secrets.COMMIT_BACK }}
+        run: |
+          set -euo pipefail
+          python update_tree.py
+
+      - name: List generated data files
+        run: |
+          echo "=== ls data ==="
+          ls -la data || true
+          echo "--- species.json head ---"
+          head -n 40 data/species.json || true
+          echo "--- tree.mmd head ---"
+          head -n 80 data/tree.mmd || true
+
+      - name: Upload data artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: phylo-data
+          path: data
+
+      - name: Commit & push data (if COMMIT_BACK true)
+        if: env.COMMIT_BACK == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMIT_BACK: ${{ secrets.COMMIT_BACK }}
+        run: |
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add data || true
+          git commit -m "Auto-update species data" || echo "no changes to commit"
+          branch="${GITHUB_REF#refs/heads/}"
+          repo="${GITHUB_REPOSITORY}"
+          if [ -n "$repo" ]; then
+            remote="https://x-access-token:${GITHUB_TOKEN}@github.com/${repo}.git"
+            git remote set-url origin "$remote"
+            git push origin "$branch" || echo "push failed"
