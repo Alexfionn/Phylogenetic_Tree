@@ -179,20 +179,90 @@ def build_newick(tree):
     inner = nested_to_newick(tree, 0)
     return f"({inner});"
 
-def render_newick_to_svg(newick_str, svg_path):
-    # read string into tree
+def render_newick_to_svg(newick_str: str, svg_path: str):
+    """
+    Improved rendering:
+    - black background, white branches and labels
+    - internal node labels hidden; only leaves labeled
+    - leaf labels shortened to "G. species" if they look like "Genus_species"
+    - automatic figure sizing and font scaling
+    """
+    # parse tree
     tree = Phylo.read(StringIO(newick_str), "newick")
-    nterm = len(tree.get_terminals())
-    width = max(8, min(40, nterm * 0.2 + 5))
-    height = max(6, min(200, nterm * 0.25 + 2))
 
+    # number of terminals and max label length (approx)
+    terminals = tree.get_terminals()
+    nterm = len(terminals)
+    max_label_len = 0
+    for t in terminals:
+        if t.name:
+            lab = t.name.replace("_", " ")
+            max_label_len = max(max_label_len, len(lab))
+
+    # heuristics for figure size and font
+    # these values are conservative but can be tuned
+    width = max(8, min(80, 0.25 * nterm + 0.05 * max_label_len + 6))
+    height = max(6, min(200, 0.25 * nterm + 2))
+    base_font = max(8, int(min(16, 110 / max(10, nterm))))  # reduce font as tips grow
+
+    # Helper for label formatting: only show terminal labels, shortened
+    def label_func(clade):
+        if clade.is_terminal() and clade.name:
+            # convert "Genus_species" -> "G. species" where possible
+            txt = clade.name.replace("_", " ")
+            parts = txt.split()
+            if len(parts) >= 2:
+                genus = parts[0]
+                epithet = " ".join(parts[1:])
+                short = f"{genus[0]}. {epithet}"
+                # if short is not much shorter than full name, prefer the full
+                return short if len(short) + 2 < len(txt) else txt
+            return txt
+        return None  # hide internal node labels
+
+    # Create figure
     fig = plt.figure(figsize=(width, height), dpi=150)
-    ax = fig.add_subplot(1,1,1)
+    ax = fig.add_subplot(1, 1, 1)
+    ax.set_facecolor("black")        # black background for plot area
+    fig.patch.set_facecolor("black") # black around figure
     ax.set_axis_off()
-    Phylo.draw(tree, axes=ax, do_show=False, show_confidence=False)
-    ax.set_title("Taxonomy tree (taxonomy-based cladogram)", fontsize=14)
+
+    # Draw tree. Use label_func to control leaf labels.
+    Phylo.draw(
+        tree,
+        axes=ax,
+        do_show=False,
+        show_confidence=False,
+        label_func=label_func
+    )
+
+    # Post-process: make lines white and thicker, texts white and with nicer font
+    # Lines are matplotlib Line2D objects on the axis
+    for line in ax.get_lines():
+        line.set_color("white")
+        line.set_linewidth(1.6)
+
+    # Fix text objects:
+    for txt in ax.texts:
+        txt.set_color("white")
+        # set a font size relative to base_font, but allow title-style bigger
+        txt.set_fontsize(base_font)
+        # make text slightly bolder for contrast
+        try:
+            txt.set_weight("normal")
+        except Exception:
+            pass
+
+    # Title and footer caption (white)
+    ax.set_title("Taxonomy tree (taxonomy-based cladogram)", fontsize=max(12, base_font+2), color="white", pad=12)
+
+    # footer caption - include timestamp
+    ts = datetime.utcnow().isoformat() + "Z"
+    fig.text(0.01, 0.01, f"Auto-generated taxonomy SVG ({ts})", fontsize=max(8, base_font-2), color="white")
+
+    # Save and close
     ensure_dir(os.path.dirname(svg_path) or ".")
-    fig.savefig(svg_path, format="svg", bbox_inches="tight")
+    fig.savefig(svg_path, format="svg", bbox_inches="tight", facecolor=fig.get_facecolor())
     plt.close(fig)
 
 # -------------------------
