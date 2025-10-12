@@ -1,0 +1,52 @@
+[
+  {
+    "kingdom": "Animalia",
+    "phylum": "Arthropoda",
+    "class": "Malacostraca",
+    "order": "Isopoda",
+    "family": "Armadilidiiae",
+    "genus": "Armadillidium",
+    "species": "Maculatum",
+    "_notion_page_id": "288d1a5e-9ddb-801c-8b00-e64cfb17ae2d"
+  },
+  {
+    "kingdom": "Animalia",
+    "phylum": "Chordata",
+    "class": "Reptilia",
+    "order": "Squamata",
+    "family": "Agamidae",
+    "genus": "Pogona",
+    "species": "Henrylawsoni",
+    "_notion_page_id": "288d1a5e-9ddb-802e-b0e4-de8efb42d6a8"
+  },
+  {
+    "kingdom": "Animalia",
+    "phylum": "Chordata",
+    "class": "Reptilia",
+    "order": "Squamata",
+    "family": "Colubridae",
+    "genus": "Natrix",
+    "species": "N. Natrix",
+    "_notion_page_id": "288d1a5e-9ddb-8065-8a06-f11da92b95dd"
+  },
+  {
+    "kingdom": "Animalia",
+    "phylum": "Chordata",
+    "class": "Reptilia",
+    "order": "Squamata",
+    "family": "Agamidae",
+    "genus": "Pogona",
+    "species": "Vitticeps",
+    "_notion_page_id": "288d1a5e-9ddb-8072-b58d-fd75da6618aa"
+  },
+  {
+    "kingdom": "Animalia",
+    "phylum": "Arthropoda",
+    "class": "Diplopoda",
+    "order": "Spiriopoda",
+    "family": "Rhinocricidae",
+    "genus": "Anadenobolus",
+    "species": "A.monilicornis",
+    "_notion_page_id": "288d1a5e-9ddb-80de-93ff-e9642158bc14"
+  }
+]
