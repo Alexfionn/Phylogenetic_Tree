@@ -63,17 +63,19 @@ def pretty_preview(s: Optional[str]) -> str:
 def ensure_dir(path: str):
     os.makedirs(path, exist_ok=True)
 
-def safe_id(name: str) -> str:
-    h = hashlib.sha1(name.encode("utf8")).hexdigest()[:10]
-    cleaned = "".join(ch if ch.isalnum() else "_" for ch in name)
-    return f"n_{cleaned[:20]}_{h}"
+def safe_id_for(rank: Optional[str], name: str) -> str:
+    # stable id using both rank and name
+    base = f"{(rank or '').strip()}||{name.strip()}"
+    h = hashlib.sha1(base.encode("utf8")).hexdigest()[:10]
+    cleaned = "".join(ch if ch.isalnum() else "_" for ch in base)
+    return f"n_{cleaned[:32]}_{h}"
 
 def normalize_name(s: Optional[str]) -> Optional[str]:
     if not s: return None
     return " ".join(s.strip().split()) or None
 
 # ---- Wiki caching & search ----
-def load_wiki_cache() -> Dict[str, str]:
+def load_wiki_cache() -> Dict[str, Optional[str]]:
     ensure_dir(DATA_DIR)
     if os.path.exists(WIKI_CACHE_FILE):
         try:
@@ -83,7 +85,7 @@ def load_wiki_cache() -> Dict[str, str]:
             return {}
     return {}
 
-def save_wiki_cache(cache: Dict[str, str]):
+def save_wiki_cache(cache: Dict[str, Optional[str]]):
     ensure_dir(DATA_DIR)
     with open(WIKI_CACHE_FILE, "w", encoding="utf8") as f:
         json.dump(cache, f, ensure_ascii=False, indent=2)
@@ -91,27 +93,19 @@ def save_wiki_cache(cache: Dict[str, str]):
 WIKI_CACHE = load_wiki_cache()
 
 def wikipedia_search_url(name: str, rank_hint: Optional[str]=None) -> Optional[str]:
-    """
-    Search Wikipedia for 'name' (optionally with rank hint).
-    Returns full URL if found, else None.
-    Caches results in WIKI_CACHE.
-    """
-    key = f"{rank_hint or ''}||{name}"
+    key = f"{(rank_hint or '')}||{name}"
     if key in WIKI_CACHE:
-        return WIKI_CACHE[key]
-
-    # build search query: prefer exact name and optionally include rank as disambiguator
-    query = f"{name}"
+        return WIKI_CACHE.get(key)
+    query = name
     if rank_hint:
         query = f"{name} {rank_hint}"
-    # Use MediaWiki API search
     api = "https://en.wikipedia.org/w/api.php"
     params = {
         "action": "query",
         "format": "json",
         "list": "search",
         "srsearch": query,
-        "srlimit": 3,
+        "srlimit": 5,
         "srprop": ""
     }
     try:
@@ -120,12 +114,13 @@ def wikipedia_search_url(name: str, rank_hint: Optional[str]=None) -> Optional[s
         data = r.json()
         hits = data.get("query", {}).get("search", [])
         if hits:
-            # prefer page whose title matches name case-insensitively
             title = None
             lower_name = name.lower()
+            # prefer exact-match title (without parentheses)
             for h in hits:
-                if h.get("title","").lower().split(" (")[0] == lower_name:
-                    title = h.get("title")
+                t = h.get("title","")
+                if t.lower().split(" (")[0] == lower_name:
+                    title = t
                     break
             if not title:
                 title = hits[0].get("title")
@@ -133,14 +128,12 @@ def wikipedia_search_url(name: str, rank_hint: Optional[str]=None) -> Optional[s
                 url_title = title.replace(" ", "_")
                 url = f"https://en.wikipedia.org/wiki/{urllib.parse.quote(url_title)}"
                 WIKI_CACHE[key] = url
-                # small sleep to be polite
-                time.sleep(0.25)
                 save_wiki_cache(WIKI_CACHE)
+                time.sleep(0.2)
                 return url
     except Exception:
-        # network errors -> cache negative result to avoid repeated failures?
+        # network hiccup: don't crash; store None to avoid repeated tries too quickly
         pass
-    # no found
     WIKI_CACHE[key] = None
     save_wiki_cache(WIKI_CACHE)
     return None
@@ -187,7 +180,6 @@ def extract_row_properties(page: Dict[str, Any]) -> Dict[str, Optional[str]]:
                             value = p[candidate]
                             break
         row[key.lower()] = normalize_name(value)
-    # Notion page id (row page)
     row["_notion_page_id"] = page.get("id")
     return row
 
@@ -208,7 +200,8 @@ def build_tree(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         node = tree
         for rank in RANK_KEYS:
             v = r.get(rank.lower())
-            if not v: break
+            if not v:
+                break
             if v not in node:
                 node[v] = {}
             node = node[v]
@@ -218,151 +211,96 @@ def build_tree(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
 def render_mermaid_with_links(tree: Dict[str, Any], rows: List[Dict[str, Any]], graph_dir="TD") -> str:
     """
     Builds a mermaid string with:
-     - nodes labeled as "Rank: Name" for higher ranks (Phylum, Order, ...) and Binomial for species
+     - nodes labeled as "Rank: Name" for higher ranks and Binomial for species
      - classDefs for phylum (light gray) and species (dark green)
      - click handlers linking to Wikipedia (if found) and Notion page for species if available
     """
-    # Map a taxon name -> sample row (to get Notion page id for species)
     species_page_by_name = {}
     for r in rows:
         spec = r.get("species")
         genus = r.get("genus")
         if spec and genus:
             binom = f"{genus} {spec}"
-            # store page id if present
             pid = r.get("_notion_page_id")
             if pid:
                 species_page_by_name[binom] = pid
 
-    lines = [f"%% Generated {datetime.utcnow().isoformat()}Z", f"graph {graph_dir}"]
-    class_nodes = {"phylum": [], "species": []}  # store node ids for class assignments
-    click_lines = []  # store click commands
+    lines: List[str] = [f"%% Generated {datetime.utcnow().isoformat()}Z", f"graph {graph_dir}"]
+    class_nodes = {"phylum": [], "species": []}
+    click_lines: List[str] = []
     created_nodes = set()
 
-    def add_node(name: str, rank: Optional[str] = None, parent_name: Optional[str] = None):
-        """Create node and connect to parent if present. Also set class & click if available."""
-        if name is None:
-            return
-        nid = safe_id(f"{rank or ''}::{name}")
-        if nid not in created_nodes:
-            # label formatting
-            if rank and rank.lower() != "species":
-                # For higher ranks: show 'Rank: Name'
-                label = f"{rank}: {name}"
-            else:
-                # species: use binomial (we try to keep species as 'Genus species' if possible)
-                # name might already be 'Genus species' or just species; try to leave as is
-                label = name
-            label_escaped = label.replace('"', '\\"')
-            lines.append(f'{nid}["{label_escaped}"]')
-            created_nodes.add(nid)
+    def node_label_for(rank: Optional[str], node_name: str) -> str:
+        if rank and rank.lower() != "species":
+            return f"{rank}: {node_name}"
+        else:
+            return node_name
 
-            # class assignment
-            if rank and rank.lower() == "phylum":
-                class_nodes["phylum"].append(nid)
-            if rank and rank.lower() == "species":
-                class_nodes["species"].append(nid)
-
-            # attempt wikipedia link (rank hint may improve search)
-            wiki_url = wikipedia_search_url(name, rank_hint=rank)
-            # Notion page link for species (prefer Notion page for species)
-            notion_link = None
-            if rank and rank.lower() == "species":
-                # if name is binomial, check dictionary
-                if name in species_page_by_name:
-                    pid = species_page_by_name[name]
-                    # create a Notion page link (Notion handles several link formats; this is the simplest)
-                    notion_link = f"https://www.notion.so/{pid}"
-            # choose link priority: Notion page (if species) and wiki_url as fallback; but we can include both via wiki first and Notion second in title
-            if notion_link:
-                # prefer opening Notion page
+    def create_node(rank: Optional[str], node_name: str):
+        nid = safe_id_for(rank, node_name)
+        if nid in created_nodes:
+            return nid
+        label = node_label_for(rank, node_name).replace('"', '\\"')
+        lines.append(f'{nid}["{label}"]')
+        created_nodes.add(nid)
+        if rank and rank.lower() == "phylum":
+            class_nodes["phylum"].append(nid)
+        if rank and rank.lower() == "species":
+            class_nodes["species"].append(nid)
+        # links
+        wiki = wikipedia_search_url(node_name, rank_hint=rank)
+        if rank and rank.lower() == "species":
+            if node_name in species_page_by_name:
+                pid = species_page_by_name[node_name]
+                notion_link = f"https://www.notion.so/{pid}"
                 click_lines.append(f'click {nid} "{notion_link}" "Open Notion page"')
-            elif wiki_url:
-                click_lines.append(f'click {nid} "{wiki_url}" "Open Wikipedia"')
+                return nid
+        if wiki:
+            click_lines.append(f'click {nid} "{wiki}" "Open Wikipedia"')
+        return nid
 
-        # connect to parent if provided
-        if parent_name:
-            parent_nid = safe_id(f"{(None) if not parent_name else ""}::{parent_name}")
-            # parent node might not have been created with rank info here; ensure parent created too (without rank info)
-            # To keep stable IDs for parent, use same safe_id pattern that includes rank unknown - but we actually created parents using add_node with rank before children when recursion happens.
-            # So we attempt to connect using parent's existing safe_id constructed the same way earlier.
-            lines.append(f"{safe_id(f'::{parent_name}')} --> {nid}")
-
-    # We'll walk the tree but need deterministic parent ids; implement recursive walk that also knows rank level
-    def walk(subtree: Dict[str, Any], rank_index: int = 0, parent_name: Optional[str] = None):
+    def walk(subtree: Dict[str, Any], rank_index: int = 0, parent_info: Optional[Dict[str,str]] = None):
+        # parent_info: {"rank": rank_str, "name": name}
         for name, child in sorted(subtree.items(), key=lambda x: x[0].lower()):
             rank = RANK_KEYS[rank_index] if rank_index < len(RANK_KEYS) else None
-            # For species, create Binomial label if possible (we may not have genus/species combined here)
-            # We'll attempt to build binomial for species nodes by checking parent_genus name
+            # if species and parent_info holds genus, create binomial
             if rank and rank.lower() == "species":
-                # parent_name should be Genus; combine if parent exists
-                if parent_name:
-                    binom = f"{parent_name} {name}"
-                    node_name = binom
+                if parent_info and parent_info.get("rank","").lower() == "genus":
+                    node_name = f"{parent_info.get('name')} {name}"
                 else:
                     node_name = name
             else:
                 node_name = name
-            # Create node with rank
-            nid = safe_id(f"{rank or ''}::{node_name}")
-            # Define node (label + link + class)
-            if nid not in created_nodes:
-                if rank and rank.lower() != "species":
-                    label = f"{rank}: {node_name}"
-                else:
-                    label = node_name
-                label_escaped = label.replace('"', '\\"')
-                lines.append(f'{nid}["{label_escaped}"]')
-                created_nodes.add(nid)
-                # classes
-                if rank and rank.lower() == "phylum":
-                    class_nodes["phylum"].append(nid)
-                if rank and rank.lower() == "species":
-                    class_nodes["species"].append(nid)
-                # links
-                # wiki search (use node_name, with rank hint)
-                wiki_url = wikipedia_search_url(node_name, rank_hint=rank)
-                notion_link = None
-                if rank and rank.lower() == "species":
-                    if node_name in species_page_by_name:
-                        pid = species_page_by_name[node_name]
-                        notion_link = f"https://www.notion.so/{pid}"
-                if notion_link:
-                    click_lines.append(f'click {nid} "{notion_link}" "Open Notion page"')
-                elif wiki_url:
-                    click_lines.append(f'click {nid} "{wiki_url}" "Open Wikipedia"')
-            # connect to parent
-            if parent_name:
-                parent_nid = safe_id(f"{RANK_KEYS[max(0, rank_index-1)] if rank_index>0 else ''}::{parent_name}")
-                # parent id might not match exactly if parent was created with different key; simpler: compute parent's safe id in same scheme as above:
-                lines.append(f"{safe_id(f'{RANK_KEYS[rank_index-1] if rank_index>0 else ''}::{parent_name}')} --> {nid}")
+            nid = create_node(rank, node_name)
+            # connect to parent if present
+            if parent_info:
+                parent_rank = parent_info.get("rank")
+                parent_name = parent_info.get("name")
+                parent_nid = safe_id_for(parent_rank, parent_name)
+                lines.append(f"{parent_nid} --> {nid}")
             # recurse
             if child:
-                walk(child, rank_index=rank_index+1, parent_name=node_name)
+                walk(child, rank_index=rank_index+1, parent_info={"rank": rank or "", "name": node_name})
 
-    # Start walking from top-level (rank index 0)
-    walk(tree, rank_index=0, parent_name=None)
+    walk(tree, rank_index=0, parent_info=None)
 
-    # Add classDef lines (phylum light gray, species dark green)
-    lines.append("")  # spacer
+    # Styling
+    lines.append("")
     lines.append("%% Styling")
-    # colors chosen to be subtle; adjust hex as desired
     lines.append("classDef phylum fill:#f0f0f0,stroke:#666,stroke-width:1px;")
     lines.append("classDef species fill:#064e2a,stroke:#022a15,color:#ffffff,stroke-width:1px;")
-    # assign classes
     if class_nodes["phylum"]:
         lines.append("class " + ",".join(class_nodes["phylum"]) + " phylum;")
     if class_nodes["species"]:
         lines.append("class " + ",".join(class_nodes["species"]) + " species;")
 
-    # Add click lines
-    lines.append("")  # spacer
+    lines.append("")
     lines.append("%% Click links")
     lines.extend(click_lines)
 
     return "\n".join(lines)
 
-# ---- Notion block update (same as earlier) ----
+# ---- Notion block update ----
 def retrieve_block(block_id: str) -> Optional[Dict[str, Any]]:
     try:
         b = notion.blocks.retrieve(block_id=block_id)
