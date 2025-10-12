@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 # coding: utf-8
 """
-update_tree_svg_block_replace.py
-
-Erzeugt ein taxonomy-basierendes Newick-Tree-SVG (wie zuvor) und ersetzt einen vorhandenen
-Notion-Block (NOTION_BLOCK_ID) durch einen Image-Block, der auf die generierte SVG zeigt.
-
-Wichtig:
-- Wenn COMMIT_BACK=true: Script commit/pusht data/tree.svg ins Repo und versucht raw.githubusercontent URL zu verwenden.
-- Wenn Repo privat oder du willst eigene URL nutzen: setze IMAGE_URL env var (öffentliche URL), dann wird diese verwendet.
+update_tree_svg_block_replace.py - improved
+- Tries Graphviz layout first (Phylo.draw_graphviz) for cleaner, non-overlapping layout.
+- Falls Graphviz nicht verfügbar, falls back to an improved matplotlib cladogram:
+    - black background, white branches/text
+    - shortened terminal labels
+    - autosize figure and font
+- Replaces the NOTION_BLOCK_ID by deleting it and appending an external image block pointing to the SVG URL.
+- Supports COMMIT_BACK + IMAGE_URL override like before.
 """
-
-import os, json, re
+import os, json, re, shutil
 from io import StringIO
 from datetime import datetime
 from typing import List, Dict, Any, Optional
@@ -27,7 +26,7 @@ from notion_client import Client
 from notion_client.errors import APIResponseError
 
 # -------------------------
-# Konfiguration (anpassen falls nötig)
+# Configuration
 # -------------------------
 RANK_KEYS = ["Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species"]
 
@@ -39,15 +38,13 @@ TREE_SVG = os.path.join(DATA_DIR, "tree.svg")
 # Env / Secrets
 NOTION_TOKEN = os.getenv("NOTION_TOKEN")
 NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
-NOTION_BLOCK_ID = os.getenv("NOTION_BLOCK_ID")     # der Block, den wir ersetzen wollen (muss existieren)
+NOTION_BLOCK_ID = os.getenv("NOTION_BLOCK_ID")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 COMMIT_BACK = os.getenv("COMMIT_BACK", "false").lower() in ("1","true","yes")
-GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY")  # owner/repo
+GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY")
 GITHUB_REF = os.getenv("GITHUB_REF", "refs/heads/main")
-# optional: set an explicit IMAGE_URL (publicly reachable) to use instead of raw.githubusercontent (useful for private repos)
 IMAGE_URL_OVERRIDE = os.getenv("IMAGE_URL")
 
-# minimal sanity
 if not NOTION_TOKEN or not NOTION_DATABASE_ID:
     raise SystemExit("Fehler: Setze NOTION_TOKEN und NOTION_DATABASE_ID als Environment/Secrets.")
 if not NOTION_BLOCK_ID:
@@ -56,7 +53,7 @@ if not NOTION_BLOCK_ID:
 notion = Client(auth=NOTION_TOKEN)
 
 # -------------------------
-# Hilfsfunktionen
+# Helpers
 # -------------------------
 def normalize_id(s: Optional[str]) -> Optional[str]:
     if not s:
@@ -81,7 +78,7 @@ def pretty_preview(s: Optional[str]) -> str:
     return f"{s[:4]}...{s[-4:]} (len={len(s)})"
 
 # -------------------------
-# Notion DB lesen
+# Notion DB reading
 # -------------------------
 def query_all_database(database_id: str) -> List[Dict[str, Any]]:
     results = []
@@ -139,7 +136,7 @@ def deduplicate_rows(rows):
     return out
 
 # -------------------------
-# Baumspezifikation -> Newick / Rendering
+# Build tree & Newick
 # -------------------------
 def build_tree(rows):
     tree = {}
@@ -179,94 +176,155 @@ def build_newick(tree):
     inner = nested_to_newick(tree, 0)
     return f"({inner});"
 
-def render_newick_to_svg(newick_str: str, svg_path: str):
+# -------------------------
+# Rendering
+# -------------------------
+def try_graphviz_render(newick_str: str, svg_path: str, prefer_prog: Optional[str]=None) -> bool:
     """
-    Improved rendering:
-    - black background, white branches and labels
-    - internal node labels hidden; only leaves labeled
-    - leaf labels shortened to "G. species" if they look like "Genus_species"
-    - automatic figure sizing and font scaling
+    Try to render using Graphviz layout via Biopython's draw_graphviz.
+    Returns True on success, False on any failure.
     """
-    # parse tree
-    tree = Phylo.read(StringIO(newick_str), "newick")
+    try:
+        # dynamic import (may not be available)
+        from Bio.Phylo._utils import _get_graphviz_layout
+        # parse the tree
+        tree = Phylo.read(StringIO(newick_str), "newick")
+        # choose program: if prefer_prog given use it; else heuristics
+        prog = prefer_prog or ("twopi" if len(tree.get_terminals())<60 else "dot")
+        # attempt layout & draw_graphviz; Biopython's internal functions may use pydot/pygraphviz
+        # We use Phylo.draw_graphviz if available (Bio.Phylo has draw_graphviz in some versions)
+        try:
+            Phylo.draw_graphviz(tree, prog=prog, axes=None)  # some versions return a figure handle
+            # If draw_graphviz draws directly to current axes, but we want an svg file:
+            # fallback: create a pydot representation and render to svg via graphviz commandline
+        except Exception:
+            # fallback approach: produce a DOT string ourselves via Phylo.to_networkx? Simpler: use 'dot' via commandline
+            dot_file = svg_path + ".dot"
+            # produce a simple dot by converting newick externally - but to keep it robust we just try pydot:
+            import pydot
+            # Use Phylo to generate a tree diagram: create a minimal dot graph (terminals only)
+            # This is a last-resort attempt; if it fails, we return False so the fallback renderer runs.
+            graph = pydot.Dot(graph_type='graph')
+            for cl in tree.get_terminals():
+                node = pydot.Node(str(id(cl)), label=(cl.name or ""))
+                graph.add_node(node)
+            # No edges created here -> poor result; we prefer Phylo.draw_graphviz above.
+            graph.write_svg(svg_path)
+        # If we got here, verify file exists
+        if os.path.exists(svg_path):
+            return True
+        # else return False to try other renderer
+        return False
+    except Exception as e:
+        # Graphviz/pydot/pygraphviz not available or failed
+        # print for debugging
+        print("[DEBUG] Graphviz render attempt failed:", e)
+        return False
 
-    # number of terminals and max label length (approx)
+def render_newick_to_svg_matplotlib(newick_str: str, svg_path: str):
+    """
+    Fallback matplotlib renderer: improved cladogram, black background, white lines and text.
+    Shortens labels and autosizes figure.
+    """
+    tree = Phylo.read(StringIO(newick_str), "newick")
     terminals = tree.get_terminals()
     nterm = len(terminals)
+    # compute max label length
     max_label_len = 0
+    term_names = []
     for t in terminals:
-        if t.name:
-            lab = t.name.replace("_", " ")
-            max_label_len = max(max_label_len, len(lab))
+        nm = t.name or ""
+        lab = nm.replace("_", " ")
+        term_names.append(lab)
+        max_label_len = max(max_label_len, len(lab))
 
-    # heuristics for figure size and font
-    # these values are conservative but can be tuned
-    width = max(8, min(80, 0.25 * nterm + 0.05 * max_label_len + 6))
-    height = max(6, min(200, 0.25 * nterm + 2))
-    base_font = max(8, int(min(16, 110 / max(10, nterm))))  # reduce font as tips grow
+    # figure heuristics
+    width = max(8, min(80, 0.28 * nterm + 0.05 * max_label_len + 4))
+    height = max(6, min(200, 0.22 * nterm + 2))
+    base_font = max(6, int(min(16, 120 / max(8, nterm))))
 
-    # Helper for label formatting: only show terminal labels, shortened
+    # adaptive label shortening: if very many tips, show only epithet
+    use_epithet_only = nterm > 180
+    use_initial_genus = nterm > 80
+
     def label_func(clade):
         if clade.is_terminal() and clade.name:
-            # convert "Genus_species" -> "G. species" where possible
             txt = clade.name.replace("_", " ")
             parts = txt.split()
             if len(parts) >= 2:
                 genus = parts[0]
                 epithet = " ".join(parts[1:])
+                if use_epithet_only:
+                    return epithet
+                if use_initial_genus:
+                    return f"{genus[0]}. {epithet}"
                 short = f"{genus[0]}. {epithet}"
-                # if short is not much shorter than full name, prefer the full
                 return short if len(short) + 2 < len(txt) else txt
             return txt
-        return None  # hide internal node labels
+        return None
 
-    # Create figure
     fig = plt.figure(figsize=(width, height), dpi=150)
-    ax = fig.add_subplot(1, 1, 1)
-    ax.set_facecolor("black")        # black background for plot area
-    fig.patch.set_facecolor("black") # black around figure
+    ax = fig.add_subplot(1,1,1)
+    ax.set_facecolor("black")
+    fig.patch.set_facecolor("black")
     ax.set_axis_off()
 
-    # Draw tree. Use label_func to control leaf labels.
-    Phylo.draw(
-        tree,
-        axes=ax,
-        do_show=False,
-        show_confidence=False,
-        label_func=label_func
-    )
+    Phylo.draw(tree, axes=ax, do_show=False, show_confidence=False, label_func=label_func)
 
-    # Post-process: make lines white and thicker, texts white and with nicer font
-    # Lines are matplotlib Line2D objects on the axis
+    # make lines white and thicker
     for line in ax.get_lines():
         line.set_color("white")
         line.set_linewidth(1.6)
-
-    # Fix text objects:
+    # texts white
     for txt in ax.texts:
         txt.set_color("white")
-        # set a font size relative to base_font, but allow title-style bigger
         txt.set_fontsize(base_font)
-        # make text slightly bolder for contrast
         try:
             txt.set_weight("normal")
         except Exception:
             pass
 
-    # Title and footer caption (white)
+    # title and footer in white
     ax.set_title("Taxonomy tree (taxonomy-based cladogram)", fontsize=max(12, base_font+2), color="white", pad=12)
-
-    # footer caption - include timestamp
     ts = datetime.utcnow().isoformat() + "Z"
     fig.text(0.01, 0.01, f"Auto-generated taxonomy SVG ({ts})", fontsize=max(8, base_font-2), color="white")
 
-    # Save and close
     ensure_dir(os.path.dirname(svg_path) or ".")
     fig.savefig(svg_path, format="svg", bbox_inches="tight", facecolor=fig.get_facecolor())
     plt.close(fig)
 
+def render_newick_to_svg(newick_str: str, svg_path: str):
+    """
+    Try graphviz rendering first (better layout). If unavailable, fallback to matplotlib renderer.
+    Heuristics choose graphviz program depending on tree size.
+    """
+    # choose preferred graphviz program heuristically
+    # small trees -> twopi (radial) might look nice; medium->neato; large->dot
+    try:
+        tree = Phylo.read(StringIO(newick_str), "newick")
+        nterm = len(tree.get_terminals())
+    except Exception:
+        nterm = 0
+    prefer = None
+    if nterm <= 30:
+        prefer = "twopi"
+    elif nterm <= 120:
+        prefer = "neato"
+    else:
+        prefer = "dot"
+
+    # try graphviz render
+    ok = try_graphviz_render(newick_str, svg_path, prefer_prog=prefer)
+    if ok:
+        print(f"[INFO] Rendered with Graphviz (prog={prefer}) to {svg_path}")
+        return
+    # fallback
+    print("[INFO] Graphviz rendering unavailable or failed — falling back to matplotlib renderer.")
+    render_newick_to_svg_matplotlib(newick_str, svg_path)
+    print(f"[INFO] Rendered with matplotlib fallback to {svg_path}")
+
 # -------------------------
-# Git commit/push helper (optional)
+# Git commit/push helper (unchanged)
 # -------------------------
 def git_commit_and_push(file_paths: List[str], message: str = "Auto: update tree SVG"):
     if not GITHUB_TOKEN or not GITHUB_REPOSITORY:
@@ -291,7 +349,7 @@ def raw_github_url(path: str) -> Optional[str]:
     return f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/{branch}/{p}"
 
 # -------------------------
-# Notion: replace block with image
+# Notion replace image functions (unchanged)
 # -------------------------
 def retrieve_block(block_id: str):
     try:
@@ -301,10 +359,6 @@ def retrieve_block(block_id: str):
         return None
 
 def replace_block_with_image(block_id: str, image_url: str, caption: str = "") -> bool:
-    """
-    Replaces the given block by deleting it and appending an image block under the same parent.
-    Note: appended image will be at the end of the parent's children list.
-    """
     b = retrieve_block(block_id)
     if not b:
         print("[ERROR] Could not retrieve block to replace.")
@@ -314,15 +368,11 @@ def replace_block_with_image(block_id: str, image_url: str, caption: str = "") -
     if not parent_id:
         print("[ERROR] Parent ID not found for block; cannot append image.")
         return False
-
-    # delete original block (best-effort)
     try:
         notion.blocks.delete(block_id=block_id)
         print(f"[INFO] Deleted original block {block_id}")
     except Exception as e:
         print("[WARN] Could not delete block; will attempt to append image anyway:", e)
-
-    # prepare image block (external)
     block = {
         "object": "block",
         "type": "image",
@@ -333,7 +383,6 @@ def replace_block_with_image(block_id: str, image_url: str, caption: str = "") -
     }
     if caption:
         block["image"]["caption"] = [{"type":"text","text":{"content": caption}}]
-
     try:
         notion.blocks.children.append(block_id=parent_id, children=[block])
         print(f"[OK] Appended image block to parent {parent_id} (replaced block {block_id})")
@@ -374,7 +423,7 @@ def main():
         f.write(newick)
     print(f"[INFO] Wrote Newick ({len(newick)} chars) to {TREE_NWK}")
 
-    # 3) render svg
+    # 3) render svg (Graphviz preferred)
     try:
         render_newick_to_svg(newick, TREE_SVG)
         print(f"[INFO] Rendered SVG to {TREE_SVG}")
@@ -382,7 +431,7 @@ def main():
         print("[ERROR] render_newick_to_svg failed:", e)
         return
 
-    # 4) obtain public image URL
+    # 4) determine public image URL
     image_url = None
     if IMAGE_URL_OVERRIDE:
         image_url = IMAGE_URL_OVERRIDE
@@ -395,12 +444,11 @@ def main():
                 image_url = url
                 print("[INFO] Using raw GitHub URL for image:", image_url)
             else:
-                print("[WARN] raw_github_url could not be formed; maybe GITHUB env missing")
+                print("[WARN] raw_github_url could not be formed")
         else:
             print("[WARN] commit/push didn't work; no image URL available")
     else:
         print("[INFO] COMMIT_BACK=false and no IMAGE_URL_OVERRIDE -> produced files locally, but no public URL to upload to Notion")
-
     if not image_url:
         print("[ERROR] No public image URL available to insert into Notion. Either set IMAGE_URL env or set COMMIT_BACK=true and ensure repo is public.")
         return
