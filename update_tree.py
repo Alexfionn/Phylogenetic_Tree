@@ -11,7 +11,10 @@ Versucht dann, NOTION_BLOCK_ID zu aktualisieren (mermaid code).
 Gibt viele Debug-Infos in stdout (wichtig für Action-Logs).
 """
 
-import os, json, re, hashlib
+import os
+import json
+import re
+import hashlib
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 
@@ -31,7 +34,7 @@ NOTION_TOKEN = os.getenv("NOTION_TOKEN")
 NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
 NOTION_BLOCK_ID = os.getenv("NOTION_BLOCK_ID")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-COMMIT_BACK = os.getenv("COMMIT_BACK", "false").lower() in ("1","true","yes")
+COMMIT_BACK = os.getenv("COMMIT_BACK", "false").lower() in ("1", "true", "yes")
 
 # Sanity: minimal env
 if not NOTION_TOKEN:
@@ -46,8 +49,10 @@ notion = Client(auth=NOTION_TOKEN)
 
 # ---- Helpers ----
 def normalize_id(maybe: Optional[str]) -> Optional[str]:
-    if not maybe: return None
+    if not maybe:
+        return None
     s = maybe.strip()
+    # If the id is a url or has fragment/query, try to extract the pure 32-hex id
     if "#" in s:
         s = s.split("#")[-1]
     if "?" in s:
@@ -60,7 +65,8 @@ NOTION_DATABASE_ID = normalize_id(NOTION_DATABASE_ID)
 NOTION_BLOCK_ID = normalize_id(NOTION_BLOCK_ID)
 
 def pretty_preview(s: Optional[str]) -> str:
-    if not s: return "<none>"
+    if not s:
+        return "<none>"
     return f"{s[:4]}...{s[-4:]} (len={len(s)})"
 
 def ensure_dir(path: str):
@@ -72,7 +78,8 @@ def safe_id(name: str) -> str:
     return f"n_{cleaned[:20]}_{h}"
 
 def normalize_name(s: Optional[str]) -> Optional[str]:
-    if not s: return None
+    if not s:
+        return None
     return " ".join(s.strip().split()) or None
 
 # ---- Notion operations ----
@@ -94,26 +101,26 @@ def query_all_database(database_id: str) -> List[Dict[str, Any]]:
 
 def extract_row_properties(page: Dict[str, Any]) -> Dict[str, Optional[str]]:
     props = page.get("properties", {})
-    row = {}
+    row: Dict[str, Optional[str]] = {}
     for key in RANK_KEYS:
         p = props.get(key)
         value = None
         if p:
             t = p.get("type")
             if t == "title":
-                value = "".join([x.get("plain_text","") for x in p.get("title",[])]) or None
+                value = "".join([x.get("plain_text", "") for x in p.get("title", [])]) or None
             elif t == "rich_text":
-                value = "".join([x.get("plain_text","") for x in p.get("rich_text",[])]) or None
+                value = "".join([x.get("plain_text", "") for x in p.get("rich_text", [])]) or None
             elif t == "select":
                 sel = p.get("select")
                 value = sel.get("name") if sel else None
             elif t == "multi_select":
-                arr = p.get("multi_select",[])
+                arr = p.get("multi_select", [])
                 value = arr[0]["name"] if arr else None
             else:
                 # fallback try common keys
                 if isinstance(p, dict):
-                    for candidate in ("name","plain_text","text"):
+                    for candidate in ("name", "plain_text", "text"):
                         if candidate in p and isinstance(p[candidate], str):
                             value = p[candidate]
                             break
@@ -133,12 +140,13 @@ def deduplicate_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 def build_tree(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    tree = {}
+    tree: Dict[str, Any] = {}
     for r in rows:
         node = tree
         for rank in RANK_KEYS:
             v = r.get(rank.lower())
-            if not v: break
+            if not v:
+                break
             if v not in node:
                 node[v] = {}
             node = node[v]
@@ -146,10 +154,10 @@ def build_tree(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 def render_mermaid(tree: Dict[str, Any], graph_dir="TD") -> str:
     lines = [f"%% Generated {datetime.utcnow().isoformat()}Z", f"graph {graph_dir}"]
-    def walk(sub, parent=None):
+    def walk(sub: Dict[str, Any], parent: Optional[str] = None):
         for name, child in sorted(sub.items(), key=lambda x: x[0].lower()):
             nid = safe_id(name)
-            label = name.replace('"','\\"')
+            label = name.replace('"', '\\"')
             lines.append(f'{nid}["{label}"]')
             if parent:
                 lines.append(f"{safe_id(parent)} --> {nid}")
@@ -181,13 +189,12 @@ def update_code_block(block_id: str, mermaid_text: str) -> bool:
     print(f"[INFO] Block type from API: {btype}")
     if btype != "code":
         print("[ERROR] Block ist kein 'code' Block. Bitte setze NOTION_BLOCK_ID auf einen code-block.")
-        # print small excerpt of returned block for debugging
         print("Block preview keys:", list(b.keys())[:12])
         return False
-    # Prepare payload: Notion expects 'code': { 'text': [ { type: 'text', text: { content: ... } } ], 'language': 'mermaid' }
+    # Prepare payload: use 'rich_text' which is accepted by recent Notion API SDKs for code blocks
     payload = {
         "code": {
-            "text": [{"type":"text","text":{"content": mermaid_text}}],
+            "rich_text": [{"type": "text", "text": {"content": mermaid_text}}],
             "language": "mermaid"
         }
     }
@@ -203,7 +210,7 @@ def update_code_block(block_id: str, mermaid_text: str) -> bool:
         return False
 
 # ---- Files write ----
-def write_files(rows, mermaid):
+def write_files(rows: List[Dict[str, Any]], mermaid: str):
     ensure = os.path.dirname(SPECIES_JSON)
     if ensure:
         os.makedirs(ensure, exist_ok=True)
@@ -260,10 +267,11 @@ def main():
     mermaid = render_mermaid(tree, graph_dir="TD")
     # write files always
     write_files(rows, mermaid)
-    # Debug: print first 10 lines of mermaid
+    # Debug: print first 20 lines of mermaid
     print("=== Mermaid preview (first 20 lines) ===")
     for i, l in enumerate(mermaid.splitlines()):
-        if i >= 20: break
+        if i >= 20:
+            break
         print(l)
     print("=== end preview ===")
     # attempt Notion update
