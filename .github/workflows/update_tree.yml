@@ -37,6 +37,7 @@ jobs:
           NOTION_BLOCK_ID: ${{ secrets.NOTION_BLOCK_ID }}
           COMMIT_BACK: ${{ secrets.COMMIT_BACK }}
         run: |
+          # Show only lengths and small preview to avoid leaking secrets
           echo "NOTION_DATABASE_ID len: ${#NOTION_DATABASE_ID}"
           echo "NOTION_BLOCK_ID len: ${#NOTION_BLOCK_ID}"
           echo "NOTION_DATABASE_ID preview: ${NOTION_DATABASE_ID:0:4}...${NOTION_DATABASE_ID: -4}"
@@ -85,3 +86,4 @@ jobs:
             remote="https://x-access-token:${GITHUB_TOKEN}@github.com/${repo}.git"
             git remote set-url origin "$remote"
             git push origin "$branch" || echo "push failed"
+          fi
